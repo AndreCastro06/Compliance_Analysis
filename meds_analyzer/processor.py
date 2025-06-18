@@ -13,6 +13,10 @@ def processar_meds(caminho_csv: str, caminho_excel_saida: str):
     # Considerar apenas registros com status "Recebida"
     df = df[df['Fluxo'].str.strip().str.lower() == 'recebida']
 
+    # Excluir registros com situação "cancelado"
+    if "Situacao" in df.columns:
+     df = df[~df["Situacao"].fillna("").str.strip().str.lower().eq("cancelado")]
+
     # Lê lista de CNPJs Pix Indiretos
     cnpjs_excluidos = set()
     df_Pix_Indiretos = pd.DataFrame()

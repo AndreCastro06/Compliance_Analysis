@@ -7,6 +7,10 @@ def gerar_base_transacional(metabase_path: str, clientes_path: str, output_path:
 
     df_metabase = pd.read_csv(metabase_path, sep=',', decimal=',', dtype=str)
     df_metabase.columns = df_metabase.columns.str.strip()
+    
+    #Exclusão de Contas com Valor Total Bloqueadas
+    df_metabase = df_metabase[~df_metabase["Account Key → Name"].str.upper().str.contains("BLQ", na=False)]
+
 
     print("Colunas disponíveis no metabase_pix.csv:")
     print(list(df_metabase.columns))
@@ -35,6 +39,7 @@ def gerar_base_transacional(metabase_path: str, clientes_path: str, output_path:
                 dados_existentes[aba] = df_antigo
 
     for documento, grupo in df_clientes.groupby("Documento"):
+
         contas = grupo["Conta Numero"].dropna().unique()
         df_cliente = df_metabase[df_metabase["Account Key"].isin(contas)]
 

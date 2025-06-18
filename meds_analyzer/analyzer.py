@@ -3,6 +3,7 @@ import os
 from datetime import datetime, timedelta
 from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl import load_workbook
+import unicodedata
 import re
 
 def formatar_cabecalhos(path_excel):
@@ -78,11 +79,30 @@ def converter_valor_brasileiro(valor):
         valor_str = valor_str.replace(',', '.')
     return float(valor_str)
 
+
+def converter_valor_brasileiro(valor):
+    if pd.isna(valor):
+        return 0.0
+    valor_str = str(valor).strip()
+    valor_str = re.sub(r'[^\d,.-]', '', valor_str)  # remove R$, espaços, etc.
+    if ',' in valor_str and '.' in valor_str:
+        # Caso típico brasileiro: '1.234.567,89'
+        valor_str = valor_str.replace('.', '').replace(',', '.')
+    elif ',' in valor_str:
+        # Caso: '1234567,89'
+        valor_str = valor_str.replace(',', '.')
+    return float(valor_str)
+
 def formatar_reais(valor):
     try:
         return f"R$ {float(valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except:
         return "R$ 0,00"
+
+
+def normalizar_datas(dataframe, coluna):
+    dataframe[coluna] = pd.to_datetime(dataframe[coluna]).dt.date
+    return dataframe
 
 def inserir_percentual_acumulado_mensal(df_analise):
     # Garantir datetime na coluna 'Data'
@@ -112,14 +132,32 @@ def inserir_percentual_acumulado_mensal(df_analise):
 
     return df_analise
 
-def gerar_analise_geral_e_diaria( caminho_meds="SEU_CAMINHO/MEDS_base.xlsx", caminho_transacional="SEU_CAMINHO/base_transacional.xlsx", caminho_clientes="SEU_CAMINHO/clientes.xlsx", saida_geral="MEDS - Analise Geral.xlsx",
-    saida_diaria="MEDS - Report Diário.xlsx", intervalo_dias=3 ):
+# Função de normalização de texto para analise de Golpes
+palavras_chave = [
+    "fraude", "triangulacao", "roubo", "furto", "golpe",
+    "estelionato", "ameaca"
+]
+
+def normalizar(texto):
+    texto = str(texto).lower()
+    texto = unicodedata.normalize('NFD', texto)
+    texto = texto.encode('ascii', 'ignore').decode('utf-8')  # Remove acentos
+    texto = re.sub(r'[^\w\s]', '', texto)  # Remove pontuação
+    return texto
+
+def gerar_analise_geral_e_diaria( caminho_meds="data/meds.csv", caminho_transacional="data/metabase_píx", caminho_clientes="SEU_CAMINHO/Base Clientes - Microcash.xlsx", saida_geral="output/ MEDS - Analise Geral.xlsx",
+    saida_diaria="output/MEDS - Report Diário.xlsx", intervalo_dias=3 ):
     abas_meds = pd.ExcelFile(caminho_meds).sheet_names
     abas_pix = pd.ExcelFile(caminho_transacional).sheet_names
 
     df_clientes = pd.read_excel(caminho_clientes, dtype=str)
     df_clientes["Documento"] = df_clientes["Documento"].str.replace(r'\D', '', regex=True)
     mapa_cnpj_para_nome = dict(zip(df_clientes["Documento"], df_clientes["Pessoa Nome"]))
+
+    # DEBUG: Verifique se os CNPJs estão batendo
+    print("🔍 Mapa CNPJ → Nome (amostra):")
+    for k, v in list(mapa_cnpj_para_nome.items())[:5]:
+        print(f"{k} → {v}")
 
     todas_analises = []
     for aba in abas_meds:
@@ -129,6 +167,8 @@ def gerar_analise_geral_e_diaria( caminho_meds="SEU_CAMINHO/MEDS_base.xlsx", cam
             df_meds = pd.read_excel(caminho_meds, sheet_name=aba, dtype=str)
             df_meds["ValorTransacao"] = pd.to_numeric(df_meds["ValorTransacao"].str.replace(',', '.'), errors='coerce').fillna(0)
             df_meds["Created At: Day"] = pd.to_datetime(df_meds["DtHrCriacaoNotificacaoInfracao"]).dt.date
+        
+            
         except Exception as e:
             print(f"Erro ao ler MEDs da aba {aba}: {e}")
             continue
@@ -139,7 +179,7 @@ def gerar_analise_geral_e_diaria( caminho_meds="SEU_CAMINHO/MEDS_base.xlsx", cam
             try:
                 df_pix = pd.read_excel(caminho_transacional, sheet_name=aba_transacional, dtype=str)
                 df_pix["Transactions"] = pd.to_numeric(df_pix["Transactions"].str.replace('.', '').str.replace(',', '.'), errors='coerce').fillna(0).astype(int)
-                # df_pix["Sum of Amount"] = pd.to_numeric(df_pix["Sum of Amount"].str.replace(',', '.', regex=False).str.replace('.', '', regex=False), errors='coerce').fillna(0).astype(float).round(2)
+                df_pix["Sum of Amount"] = df_pix["Sum of Amount"].apply(converter_valor_brasileiro).fillna(0).round(2)
                 df_pix["Sum of Amount"] = df_pix["Sum of Amount"].apply(converter_valor_brasileiro).fillna(0).round(2)
                 df_pix["Data"] = pd.to_datetime(df_pix["Created At: Day"]).dt.date
             except Exception as e:
@@ -157,11 +197,13 @@ def gerar_analise_geral_e_diaria( caminho_meds="SEU_CAMINHO/MEDS_base.xlsx", cam
             data_date = pd.to_datetime(data).date()
             meds_dia = df_meds[df_meds["Created At: Day"] == data_date]
             pix_dia = df_pix[df_pix["Data"] == data_date] if not df_pix.empty else pd.DataFrame(columns=["Transactions", "Sum of Amount"])
-
             total_meds = meds_dia["ValorTransacao"].sum()
             qtd_meds = len(meds_dia)
             meds_menor_500 = meds_dia[meds_dia["ValorTransacao"] < 500]
             meds_maior_500 = meds_dia[meds_dia["ValorTransacao"] >= 500]
+            palavras_chave = ["fraude", "triangulação", "triangulacao", "roubo", "furto", "golpe", "estelionato","Triangulação","Golpe","Estelionato","Ameaça"]
+            detalhes_series = meds_dia["DetalhesNotificacaoInfracao"].astype(str).apply(normalizar)
+            qtd_suspeitas = detalhes_series.apply(lambda texto: any(p in texto for p in palavras_chave)).sum()
 
             total_pix = pix_dia["Sum of Amount"].sum()
             qtd_pix = pix_dia["Transactions"].sum()
@@ -192,8 +234,10 @@ def gerar_analise_geral_e_diaria( caminho_meds="SEU_CAMINHO/MEDS_base.xlsx", cam
                     "% MEDs x Pix-In (Qtd)": f"{(qtd_meds / qtd_pix * 100):.2f}%" if qtd_pix else "0,00%",
                     "% Valor MEDs x Pix-In (Dia)": f"{(total_meds / total_pix * 100):.2f}%" if total_pix else "0,00%",
                     "% Valor MEDs x Pix-In (Semana)": acumulado_percentual,
-                    "% Valor MEDs x Pix-In (Mês)": percentual_acumulado_mes_valor
-                }
+                    "% Valor MEDs x Pix-In (Mês)": percentual_acumulado_mes_valor,
+                    "QNT Suspeitas por Palavra-chave": qtd_suspeitas,
+                    "% MEDs Suspeitas": f"{(qtd_suspeitas / qtd_meds * 100):.2f}%" if qtd_meds else "0,00%",
+                                        }
             analise_diaria.append(linha)
 
         df_analise = pd.DataFrame(analise_diaria)
@@ -213,13 +257,15 @@ def gerar_analise_geral_e_diaria( caminho_meds="SEU_CAMINHO/MEDS_base.xlsx", cam
                         "% MEDs x Pix-In (Qtd)",
                         "% Valor MEDs x Pix-In (Dia)",
                         "% Valor MEDs x Pix-In (Semana)",
-                        "% Valor MEDs x Pix-In (Mês)"
+                        "% Valor MEDs x Pix-In (Mês)",
+                        "QNT Suspeitas por Palavra-chave",
+                        "% MEDs Suspeitas"
             ]
         ordem_existente = [col for col in ordem_colunas if col in df_analise.columns]
         df_analise = df_analise[ordem_existente]
         todas_analises.append((nome_empresa, df_analise))
 
-    # Garante que o relatório geral tenha linhas zeradas mesmo que sem MEDs ou PIX
+    # Garante os dados com linhas zeradas mesmo que sem MEDs ou PIX
     datas_completas = set()
     for _, df_empresa in todas_analises:
         datas_completas.update(df_empresa["Data"].unique())
@@ -246,7 +292,9 @@ def gerar_analise_geral_e_diaria( caminho_meds="SEU_CAMINHO/MEDS_base.xlsx", cam
               "% MEDs x Pix-In (Qtd)": "0,00%",
               "% Valor MEDs x Pix-In (Dia)": "0,00%",
               "% Valor MEDs x Pix-In (Semana)": "0,00%",
-              "% Valor MEDs x Pix-In (Mês)": "0,00%"
+              "% Valor MEDs x Pix-In (Mês)": "0,00%",
+              "QNT Suspeitas por Palavra-chave": "0",
+              "% MEDs Suspeitas": "0",
             })
         if linhas_zeradas:
             todas_analises[i] = (nome_empresa, pd.concat([df_empresa, pd.DataFrame(linhas_zeradas)], ignore_index=True))
@@ -278,36 +326,121 @@ def gerar_analise_geral_e_diaria( caminho_meds="SEU_CAMINHO/MEDS_base.xlsx", cam
             df_combinado.to_excel(writer, sheet_name=nome_empresa, index=False)
 
     # Pergunta e gera relatório diário
-    print("Deseja gerar análise dos últimos 3 dias ou apenas de ontem?")
-    print("Digite 1 para últimos 3 dias ou 2 para apenas ontem:")
-    escolha = input().strip()
 
-    if escolha == "1":
-        dias = [datetime.today().date() - timedelta(days=i) for i in range(1, 4)]
-    else:
-        dias = [datetime.today().date() - timedelta(days=1)]
+        # Solicita intervalo ao usuário
+    data_inicio_str = input("📆 Digite a data de início da análise (dd/mm/aaaa): ")
+    data_fim_str = input("📆 Digite a data de fim da análise (dd/mm/aaaa): ")
 
-    analises_diarias = [
-    (nome_empresa, df[df["Data"].isin(dias)])
-    for nome_empresa, df in todas_analises
-    if not df[df["Data"].isin(dias)].empty
-]
+    try:
+        data_inicio = datetime.strptime(data_inicio_str, "%d/%m/%Y").date()
+        data_fim = datetime.strptime(data_fim_str, "%d/%m/%Y").date()
+    except ValueError:
+        print("❌ Formato de data inválido. Use dd/mm/aaaa.")
+        return
+
+    todas_datas_disponiveis = set()
+    for _, df_empresa in todas_analises:
+        todas_datas_disponiveis.update(df_empresa["Data"].unique())
+
+    if not todas_datas_disponiveis:
+        print("⚠️ Nenhuma data encontrada nos dados.")
+        return
+    
+    # Normaliza tudo como date
+    todas_datas_disponiveis = {pd.to_datetime(d).date() for d in todas_datas_disponiveis}
+
+    primeira_data_disponivel = min(todas_datas_disponiveis)
+    ultima_data_disponivel = max(todas_datas_disponiveis)
+
+    print(f"\n📅 Intervalo de dados disponível: {primeira_data_disponivel.strftime('%d/%m/%Y')} até {ultima_data_disponivel.strftime('%d/%m/%Y')}")
+
+    # Verifica se datas inseridas estão dentro do intervalo
+    if data_inicio < primeira_data_disponivel:
+        print(f"⚠️ Data de início ajustada para a primeira data disponível: {primeira_data_disponivel.strftime('%d/%m/%Y')}")
+        data_inicio = primeira_data_disponivel.date
+
+    if data_fim > ultima_data_disponivel:
+        print(f"⚠️ Data de fim ajustada para a última data disponível: {ultima_data_disponivel.strftime('%d/%m/%Y')}")
+        data_fim = ultima_data_disponivel
+
+    # Gera o intervalo
+    modo_consolidado = (data_fim - data_inicio).days > 0
+
+    dias = pd.date_range(start=data_inicio, end=data_fim).date
+
+    # Filtra as análises com base nos dias
+    analises_diarias = []
+
+    for nome_empresa, df in todas_analises:
+        df["Data"] = pd.to_datetime(df["Data"]).dt.date
+        df_filtrado = df[df["Data"].isin(dias)]
+        if not df_filtrado.empty:
+            analises_diarias.append((nome_empresa, df_filtrado))
 
     if analises_diarias:
-        with pd.ExcelWriter(saida_diaria, engine='openpyxl', mode='w') as writer_diaria:
-            for nome_empresa, df_filtrado in analises_diarias:
-                nome_aba_seguro = nome_empresa[:31]
-                
-                # Tratativa de formatação de data
-                df_filtrado["Data"] = pd.to_datetime(df_filtrado["Data"]).dt.strftime("%d/%m/%Y")
+        df_diario_unico = pd.DataFrame()
 
-                df_filtrado.to_excel(writer_diaria, sheet_name=nome_aba_seguro, index=False)
+        for nome_empresa, df_filtrado in analises_diarias:
+            df_filtrado["Cliente"] = nome_empresa
+            if modo_consolidado:
+                df_filtrado["Qtd. Transações"] = pd.to_numeric(df_filtrado["Qtd. Transações"], errors='coerce').fillna(0)
+                df_filtrado["Qtd. MEDs"] = pd.to_numeric(df_filtrado["Qtd. MEDs"], errors='coerce').fillna(0)
+                df_filtrado["MEDs < R$ 500"] = pd.to_numeric(df_filtrado["MEDs < R$ 500"], errors='coerce').fillna(0)
+                df_filtrado["MEDs >= R$ 500"] = pd.to_numeric(df_filtrado["MEDs >= R$ 500"], errors='coerce').fillna(0)
+
+                df_filtrado["Valor Pix-In"] = df_filtrado["Valor Pix-In"].apply(converter_valor_brasileiro)
+                df_filtrado["Valor MEDs"] = df_filtrado["Valor MEDs"].apply(converter_valor_brasileiro)
+
+                agrupado = df_filtrado.groupby("Cliente").agg({
+                    "Qtd. Transações": "sum",
+                    "Valor Pix-In": "sum",
+                    "Qtd. MEDs": "sum",
+                    "Valor MEDs": "sum",
+                    "MEDs < R$ 500": "sum",
+                    "MEDs >= R$ 500": "sum"
+                }).reset_index()
+
+                agrupado["% < R$ 500"] = agrupado["MEDs < R$ 500"] / agrupado["Valor MEDs"] * 100
+                agrupado["% > R$ 500"] = agrupado["MEDs >= R$ 500"] / agrupado["Qtd. MEDs"] * 100
+                agrupado["% Transaction"] = agrupado["Qtd. MEDs"] / agrupado["Qtd. Transações"] * 100
+                agrupado["% Amount"] = agrupado["Valor MEDs"] / agrupado["Valor Pix-In"] * 100
+
+                agrupado["Valor Pix-In"] = agrupado["Valor Pix-In"].apply(formatar_reais)
+                agrupado["Valor MEDs"] = agrupado["Valor MEDs"].apply(formatar_reais)
+
+                agrupado["% < R$ 500"] = agrupado["% < R$ 500"].apply(lambda x: f"{x:.2f}%")
+                agrupado["% > R$ 500"] = agrupado["% > R$ 500"].apply(lambda x: f"{x:.2f}%")
+                agrupado["% Transaction"] = agrupado["% Transaction"].apply(lambda x: f"{x:.2f}%")
+                agrupado["% Amount"] = agrupado["% Amount"].apply(lambda x: f"{x:.2f}%")
+
+                agrupado["Data"] = f"{data_inicio.strftime('%d/%m/%Y')} até {data_fim.strftime('%d/%m/%Y')}"
+                agrupado["Ação"] = ""
+
+                agrupado = agrupado[[
+                    "Data", "Cliente", "Qtd. Transações", "Valor Pix-In", "Qtd. MEDs", "Valor MEDs",
+                    "MEDs < R$ 500", "% < R$ 500", "MEDs >= R$ 500", "% > R$ 500",
+                    "% Transaction", "% Amount", "Ação"
+                ]]
+
+                df_diario_unico = pd.concat([df_diario_unico, agrupado], ignore_index=True)
+
+            else:
+                df_filtrado["Data"] = pd.to_datetime(df_filtrado["Data"]).dt.strftime("%d/%m/%Y")
+                df_filtrado["Ação"] = ""
+                df_filtrado = df_filtrado[[
+                    "Data", "Cliente", "Qtd. Transações", "Valor Pix-In", "Qtd. MEDs", "Valor MEDs",
+                    "MEDs < R$ 500", "% MEDs < R$ 500", "MEDs >= R$ 500", "% MEDs >= R$ 500",
+                    "% MEDs x Pix-In (Qtd)", "% Valor MEDs x Pix-In (Dia)", "Ação"
+                ]]
+                df_diario_unico = pd.concat([df_diario_unico, df_filtrado], ignore_index=True)
+
+        with pd.ExcelWriter(saida_diaria, engine='openpyxl', mode='w') as writer_diaria:
+            df_diario_unico.to_excel(writer_diaria, sheet_name="Análise Diária", index=False)
 
         formatar_cabecalhos(saida_diaria)
         print(f"\n📄 Relatório diário gerado com sucesso: {saida_diaria}")
     else:
-        print("⚠️ Nenhuma empresa com dados novos para os dias selecionados.Sem necessidade de gerar novo relatório.")
+        print("⚠️ Nenhuma empresa com dados no intervalo selecionado. Sem necessidade de gerar novo relatório.")
 
     formatar_cabecalhos(saida_geral)
-    formatar_cabecalhos(saida_diaria)
-    print("\n✅ Arquivos 'MEDS - Analise Geral.xlsx' e 'MEDS - Report Diário.xlsx' gerados com sucesso.")
+
